@@ -18,6 +18,7 @@ from PIL import Image
 import typing as T
 import shutil
 import time
+import asyncio
 
 
 # 环境配置
@@ -71,6 +72,7 @@ class SchedulerManager:
         self.repo_path = f'datasets/{self.repo_id}'
         self.hf_api = HfApi()
         self.fs = HfFileSystem()
+        self.force: bool = False
         self.__scheduler: T.Optional[CommitScheduler] = None
         self.initialize()
 
@@ -134,7 +136,7 @@ class SchedulerManager:
       
         # Step 02. 检查远程仓库中的目录结构
         dirs: T.List[str] = []
-        for d in filter(lambda x:x['type'] == 'directory', self.fs.ls(self.repo_path, detail=True)):
+        for d in filter(lambda x:x['type'] == 'directory', self.fs.ls(self.repo_path, detail=True, refresh=True)):
             '''
             {
                 'name': 'datasets/megatrump/test-img2/img_000', 
@@ -160,11 +162,12 @@ class SchedulerManager:
             last_dir: str = sorted(dirs)[-1]
             # 则检查子目录中的文件数量
             files: T.List[str] = []
-            for f in filter(lambda x:x['type'] == 'file', self.fs.ls(f'{self.repo_path}/{last_dir}', detail=True)):
+            for f in filter(lambda x:x['type'] == 'file', self.fs.ls(f'{self.repo_path}/{last_dir}', detail=True, refresh=True)):
                 files.append(f['name'])
-            if len(files) >= REPO_FOLDER_LIMIT - 1:
+            if len(files) >= REPO_FOLDER_LIMIT - 1 or self.force:
                 # 如果数量超过限制, 则创建一个新的子目录
                 print(dirs)
+                print(files)
                 last_dir = self.get_next_available_folder(dirs)
                 print(last_dir)
         else:
@@ -183,7 +186,6 @@ class SchedulerManager:
         """切换到下一个目录
         """
         self.stop()
-        await asyncio.sleep(1)
         # 强制从远端获取一个新的目录
         self.initialize()
         return self.repo_folder
@@ -198,6 +200,7 @@ class SchedulerManager:
         """
         lines = self.count()
         if lines >= REPO_FOLDER_LIMIT - 1:
+            # self.force = True
             self.switch_to_next()
             return self.count()
         else:
