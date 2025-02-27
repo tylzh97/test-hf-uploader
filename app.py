@@ -63,6 +63,8 @@ class MyCommitScheduler(CommitScheduler):
     def _push_to_hub(self) -> Dict[str, Any]:
         """重写推送方法，在推送成功后清理文件"""
         global uploaded_buffer
+        if getattr(self, '__stopped') is None:
+            return {}
         logging.info(f'正在执行推送任务...{id(self)}')
         try:
             result = super()._push_to_hub()
@@ -72,6 +74,7 @@ class MyCommitScheduler(CommitScheduler):
                     file_path.unlink()
             uploaded_buffer = []
             logging.info(f'推送任务执行成功')
+            logging.info(result)
             return result
         except Exception as e:
             logging.exception(f"推送任务执行失败: {e}")
