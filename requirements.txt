@@ -10,3 +10,4 @@ gradio_client
 python-dotenv
 python-multipart
 requests
+aiofiles

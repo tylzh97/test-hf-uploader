@@ -22,30 +22,40 @@ import asyncio
 import threading
 from io import BytesIO
 import traceback
+import aiofiles
+import aiofiles.os
+import logging
+from pydantic import BaseSettings
 
-# 环境配置
 load_dotenv()
-HF_TOKEN: Optional[str] = os.getenv('HF_TOKEN')
-HF_REPO_ID: str = os.getenv('HF_REPO_ID', 'default/dataset_repo')
-GRADIO_USERNAME: Optional[str] = os.getenv("GRADIO_USERNAME")
-GRADIO_PASSWORD: Optional[str] = os.getenv("GRADIO_PASSWORD")
-API_BEARER_TOKEN: str = os.getenv("API_BEARER_TOKEN", "default_token")
-HTTP_PROXY: Optional[str] = os.getenv('http_proxy')
-HTTPS_PROXY: Optional[str] = os.getenv('https_proxy')
 
-METADATA_FILENAME: str = 'metadata.jsonl'
-LOCAL_STORAGE: str = 'image_dataset'
-REPO_FOLDER_LIMIT: int = 4
-SCHEDULER_EVERY: int = 3
+# 配置
+class Settings(BaseSettings):
+    HF_TOKEN: Optional[str] = os.getenv('HF_TOKEN')
+    HF_REPO_ID: str = os.getenv('HF_REPO_ID', 'default/dataset_repo')
+    GRADIO_USERNAME: Optional[str] = os.getenv("GRADIO_USERNAME")
+    GRADIO_PASSWORD: Optional[str] = os.getenv("GRADIO_PASSWORD")
+    API_BEARER_TOKEN: str = os.getenv("API_BEARER_TOKEN", "default_token")
+    HTTP_PROXY: Optional[str] = os.getenv('http_proxy')
+    HTTPS_PROXY: Optional[str] = os.getenv('https_proxy')
 
-# 常量
-IMAGE_DATASET_DIR_PREFIX = "image_dataset"
-MAX_IMAGES_PER_DIR = 10
+    METADATA_FILENAME: str = 'metadata.jsonl'
+    LOCAL_STORAGE: str = 'image_dataset'
+    REPO_FOLDER_LIMIT: int = 4
+    SCHEDULER_EVERY: int = 3
+
+    IMAGE_DATASET_DIR_PREFIX = "image_dataset"
+    MAX_IMAGES_PER_DIR = 10
+
+settings = Settings()
+
+# 日志配置
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 uploaded_buffer: List[str] = []  # 缓存上传的文件路径，提交后清理
 
 # 初始化目录
-Path(IMAGE_DATASET_DIR_PREFIX).mkdir(parents=False, exist_ok=True)
-
+Path(settings.IMAGE_DATASET_DIR_PREFIX).mkdir(parents=False, exist_ok=True)
 
 class MyCommitScheduler(CommitScheduler):
     """自定义 CommitScheduler, 在推送成功后清理本地文件"""
@@ -53,7 +63,7 @@ class MyCommitScheduler(CommitScheduler):
     def _push_to_hub(self) -> Dict[str, Any]:
         """重写推送方法，在推送成功后清理文件"""
         global uploaded_buffer
-        print(f'正在执行推送任务...{id(self)}')
+        logging.info(f'正在执行推送任务...{id(self)}')
         try:
             result = super()._push_to_hub()
             for file in uploaded_buffer:
@@ -61,18 +71,19 @@ class MyCommitScheduler(CommitScheduler):
                 if file_path.exists():
                     file_path.unlink()
             uploaded_buffer = []
-            print(f'推送任务执行成功')
+            logging.info(f'推送任务执行成功')
             return result
         except Exception as e:
+            logging.exception(f"推送任务执行失败: {e}")
             raise e
         finally:
-            print(f'推送任务执行完成')
+            logging.info(f'推送任务执行完成')
     
     def stop(self):
-        print(f'Before MyCommitScheduler.stop')
+        logging.info(f'Before MyCommitScheduler.stop')
         super().stop()
-        print(f'After MyCommitScheduler.stop')
-        return 
+        logging.info(f'After MyCommitScheduler.stop')
+        return
 
 
 class SchedulerManager:
@@ -87,7 +98,7 @@ class SchedulerManager:
     def initialize(self):
         # Step 00. 获取工作目录, eg: '0000'
         self.repo_folder: str = self.get_current_repo_folder() 
-        print(f'新的仓库存储目录: {self.repo_folder}')
+        logging.info(f'新的仓库存储目录: {self.repo_folder}')
         # Step 01. 检查远程目录结构, 完成本地 metadata 状态的同步
         self.initialize_local_dir()
         # Step 02. 创建 Scheduler
@@ -102,26 +113,24 @@ class SchedulerManager:
                 repo_type='dataset',
                 folder_path=self.local_folder,
                 path_in_repo=self.repo_folder,
-                every=SCHEDULER_EVERY,
+                every=settings.SCHEDULER_EVERY,
                 squash_history=True,
                 private=True,
             )
         return self.__scheduler
 
     def initialize_local_dir(self):
-        """获取应当存储的远程目录, 并在本地目录中同步 metadata
-        """
         repo_folder: str = self.repo_folder
-        self.local_folder: str = f'{LOCAL_STORAGE}/{repo_folder}'
+        self.local_folder: str = f'{settings.LOCAL_STORAGE}/{repo_folder}'
         local_folder = self.local_folder
         if not os.path.exists(local_folder):
-            os.mkdir(local_folder)
-        self.metadata_local_path: str = f'{local_folder}/{METADATA_FILENAME}'
-        metadata_repo_path: str = f'{self.repo_path}/{repo_folder}/{METADATA_FILENAME}'
+            os.makedirs(local_folder, exist_ok=False)
+        self.metadata_local_path: str = f'{local_folder}/{settings.METADATA_FILENAME}'
+        metadata_repo_path: str = f'{self.repo_path}/{repo_folder}/{settings.METADATA_FILENAME}'
 
         # Step 01. 检查 metadata 是否存在, 如果存在则同步
         if self.fs.exists(metadata_repo_path):
-            print('从远程获取 metadata')
+            logging.info('从远程获取 metadata')
             self.fs.download(metadata_repo_path, self.metadata_local_path)
         else:
             with open(self.metadata_local_path, 'w') as f:
@@ -141,14 +150,14 @@ class SchedulerManager:
         # Step 01. 检查远程仓库是否存在, 如果不存在则创建一个新的仓库
         # 由于缓存问题, 此处不能够使用 HfFileSystem 接口
         if not self.hf_api.repo_exists(self.repo_id, repo_type='dataset'):
-            print(f'创建了一个新的仓库')
+            logging.info(f'创建了一个新的仓库')
             create_repo(self.repo_id, repo_type='dataset', private=True, exist_ok=False)
             while self.hf_api.repo_exists(self.repo_id, repo_type='dataset') is False:
                 time.sleep(5)
       
         # Step 02. 检查远程仓库中的目录结构
         dirs: T.List[str] = []
-        print(self.repo_path)
+        logging.info(self.repo_path)
         for d in filter(lambda x:x['type'] == 'directory', self.fs.ls(self.repo_path, detail=True, refresh=True)):
             '''
             {
@@ -186,9 +195,9 @@ class SchedulerManager:
         return last_dir
 
     def stop(self):
-        def thread_to_sync(scheduler: CommitScheduler, folder: str, retry: int=0) -> None:
+        async def sync_and_remove(scheduler: CommitScheduler, folder: str, retry: int=0):
             if retry > 3:
-                print(f'重试多次后依然失败, 已经结束...')
+                logging.error(f'重试多次后依然失败, 已经结束...')
                 return
             success: bool = False
             try:
@@ -198,21 +207,24 @@ class SchedulerManager:
                 del scheduler
                 success = True
             except Exception as e:
-                print(f'同步旧的调度器时出现了问题: {e}')
+                logging.exception(f'同步旧的调度器时出现了问题: {e}')
                 traceback.print_exc()
             finally:
-                print(f'成功同步并清理目录: {folder}')
+                logging.info(f'成功同步并清理目录: {folder}')
             if success:
-                shutil.rmtree(folder)
+                try:
+                    shutil.rmtree(folder)
+                except Exception as e:
+                    logging.error(f"删除目录 {folder} 失败: {e}")
                 return
             else:
-                time.sleep(60)
-                return thread_to_sync(scheduler, folder, retry+1)
-            
+                await asyncio.sleep(60)
+                await sync_and_remove(scheduler, folder, retry+1)
+        
         # Step 01. 在子线程中执行旧的同步任务
-        t = threading.Thread(target=thread_to_sync, args=(self.__scheduler, self.local_folder))
-        t.start()
-        self.__scheduler = None
+        if self.__scheduler:  # 确保 scheduler 存在
+            asyncio.create_task(sync_and_remove(self.__scheduler, self.local_folder))
+            self.__scheduler = None
         return
 
     def switch_to_next(self) -> str:
@@ -224,35 +236,33 @@ class SchedulerManager:
         return self.repo_folder
 
     def count(self) -> int:
-        with open(self.metadata_local_path, 'r') as f:
-            lines: int = sum(1 for _ in f if _.strip())
-        return lines
-
-    def check(self) -> int:
-        """重新计算文件数目
-        """
-        lines = self.count()
-        if lines >= REPO_FOLDER_LIMIT - 1:
-            self.switch_to_next()
-            return self.count()
-        else:
+        try:
+            with open(self.metadata_local_path, 'r') as f:
+                lines: int = sum(1 for _ in f if _.strip())
             return lines
+        except FileNotFoundError:
+            return 0
 
-
-# 全局变量
-scheduler_manager: Optional['SchedulerManager'] = SchedulerManager(HF_REPO_ID)
-
-
+    def check(self) -> str:
+        lines = self.count()
+        if lines >= settings.MAX_IMAGES_PER_DIR - 1:
+            self.switch_to_next()
+            return f"切换到新目录: {self.repo_folder} ({self.count()}/{settings.MAX_IMAGES_PER_DIR})"
+        else:
+            return f"当前目录: {self.repo_folder} ({self.count()}/{settings.MAX_IMAGES_PER_DIR})"
 
 def validate_environment_variables() -> None:
-    """验证环境变量并显示警告（如果需要）"""
-    if HF_TOKEN is None:
-        print("Warning: HF_TOKEN environment variable is not set. You may encounter issues uploading to Hugging Face Hub.")
-    if HF_REPO_ID == "your_username/your_dataset_repo_id":
-        print("Warning: HF_REPO_ID is using the default value. Please set HF_REPO_ID environment variable.")
-    if API_BEARER_TOKEN == "your_api_token":
-        print("Warning: API_BEARER_TOKEN is using the default value. Please set API_BEARER_TOKEN environment variable.")
+    if settings.HF_TOKEN is None:
+        logging.warning("Warning: HF_TOKEN environment variable is not set. You may encounter issues uploading to Hugging Face Hub.")
+    if settings.HF_REPO_ID == "your_username/your_dataset_repo_id":
+        logging.warning("Warning: HF_REPO_ID is using the default value. Please set HF_REPO_ID environment variable.")
+    if settings.API_BEARER_TOKEN == "your_api_token":
+        logging.warning("Warning: API_BEARER_TOKEN is using the default value. Please set API_BEARER_TOKEN environment variable.")
 
+    if not settings.HF_REPO_ID:
+        raise ValueError("HF_REPO_ID is required.")
+    if not settings.API_BEARER_TOKEN:
+        raise ValueError("API_BEARER_TOKEN is required.")
 
 def configure_proxy() -> None:
     """为 Hugging Face Hub API 请求配置 HTTP 代理"""
@@ -260,145 +270,146 @@ def configure_proxy() -> None:
         def backend_factory() -> requests.Session:
             session = requests.Session()
             session.proxies = {
-                "http": HTTP_PROXY,
-                "https": HTTPS_PROXY,
+                "http": settings.HTTP_PROXY,
+                "https": settings.HTTPS_PROXY,
             }
             return session
         configure_http_backend(backend_factory=backend_factory)
 
-
-def save_image_to_dataset(filename: str, image_array: np.ndarray) -> None:
+async def save_image_to_dataset(filename: str, image_array: np.ndarray, scheduler_manager: SchedulerManager) -> None:
     """保存图片到数据集目录并更新元数据"""
-    global scheduler_manager
-    
     scheduler = scheduler_manager.get_scheduler()
     IMAGE_DATASET_DIR = Path(scheduler_manager.local_folder)
     IMAGE_JSONL_PATH = Path(scheduler_manager.metadata_local_path)
-    # 首先检查是否需要切换目录（对于之前已满的目录）
-    scheduler_manager.check()
-    
+
+    current_dir_status = scheduler_manager.check()
+
     if not filename:
         filename = f"{uuid4()}.png"
-    
+
     image_path = IMAGE_DATASET_DIR / f"{filename}"
 
-    with scheduler.lock:
-        Image.fromarray(image_array).save(image_path)
-        with IMAGE_JSONL_PATH.open("a") as f:
-            json.dump({
-                "filename": filename,
-                "file_path": image_path.name,
-                "datetime": datetime.now().isoformat()
-            }, f)
-            f.write("\n")
-    
-    uploaded_buffer.append(str(image_path))
-    
+    try:
+        with scheduler.lock:
+            image = Image.fromarray(image_array)
+            image.save(image_path)
+            async with aiofiles.open(IMAGE_JSONL_PATH, "a") as f:
+                await f.write(json.dumps({
+                    "filename": filename,
+                    "file_path": image_path.name,
+                    "datetime": datetime.now().isoformat()
+                }) + "\n")
+            uploaded_buffer.append(str(image_path))
 
-def gradio_upload_image(image_file: Image.Image, filename_input: str) -> str:
+        logging.info(f"图片 '{filename}' 保存到数据集目录: {image_path}")
+    except Exception as e:
+        logging.exception(f"保存图片 '{filename}' 失败: {e}")
+        raise
+
+async def gradio_upload_image(
+    image_file: Image.Image,
+    filename_input: str,
+    scheduler_manager: SchedulerManager = Depends(lambda: scheduler_manager)
+) -> str:
     """处理来自 Gradio 界面的图片上传"""
-    global scheduler_manager
     if image_file is None:
         return "没有上传图片"
-    
+
     image_array = np.array(image_file)
     filename = filename_input if filename_input else f"unnamed_{uuid4()}.png"
-    
-    save_image_to_dataset(filename, image_array)
-    
-    return f"图片 '{filename}' 上传成功！（当前目录 {scheduler_manager.check()}/{MAX_IMAGES_PER_DIR} 张图片）"
 
+    try:
+        await save_image_to_dataset(filename, image_array, scheduler_manager)
+        return f"图片 '{filename}' 上传成功！（{scheduler_manager.check()}）"
+    except Exception as e:
+        logging.error(f"图片上传失败: {e}")
+        return f"图片上传失败: {e}"
 
 def create_gradio_app() -> gr.Blocks:
     """创建并配置 Gradio 界面，包含正确的身份验证"""
     with gr.Blocks(title="图片上传到 Hugging Face 数据集") as demo:
         gr.Markdown("# 图片上传到 Hugging Face 数据集")
         gr.Markdown("上传图片到你的 Hugging Face 数据集存储库。")
-        
+
         with gr.Row():
             image_input = gr.Image(type="pil", label="上传图片")
             filename_input = gr.Textbox(label="文件名（可选）", placeholder="在此输入文件名")
-        
+
         upload_button = gr.Button("上传图片")
         result_output = gr.Textbox(label="结果")
-        
+
         upload_button.click(
             fn=gradio_upload_image,
             inputs=[image_input, filename_input],
             outputs=result_output
         )
-    
-    return demo
 
+    return demo
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """管理应用程序生命周期事件"""
-    global scheduler_manager
+    try:
+        validate_environment_variables()
+        configure_proxy()
 
-    CURRENT_IMAGES_COUNT = scheduler_manager.check()
-    IMAGE_DATASET_DIR = Path(scheduler_manager.local_folder)
-    
-    if HF_TOKEN is None:
-        print("Warning: HF_TOKEN is not set, commit scheduler will not start.")
-    else:
-        print(f"Commit scheduler started, saving files to {IMAGE_DATASET_DIR} and uploading to {HF_REPO_ID}")
-        print(f"Current directory contains {CURRENT_IMAGES_COUNT}/{MAX_IMAGES_PER_DIR} images")
-    
-    yield
-    
-    print("Commit scheduler stopped.")
+        global scheduler_manager
+        scheduler_manager = SchedulerManager(settings.HF_REPO_ID)
 
+        if settings.HF_TOKEN is None:
+            logging.warning("Warning: HF_TOKEN is not set, commit scheduler will not start.")
+        else:
+            logging.info(f"Commit scheduler started, saving files to {scheduler_manager.local_folder} and uploading to {settings.HF_REPO_ID}")
+            logging.info(f"{scheduler_manager.check()}") # 打印初始化状态
+
+        yield
+    finally:
+        if scheduler_manager:
+            scheduler_manager.stop() # 在应用关闭时停止 scheduler
+        logging.info("Application shutdown complete.")
 
 def init_app() -> FastAPI:
     """初始化并配置 FastAPI 应用程序"""
     application = FastAPI(lifespan=lifespan)
-    
-    # 创建带有正确配置的身份验证的 Gradio 应用
+
     gradio_auth = None
-    if GRADIO_USERNAME and GRADIO_PASSWORD:
-        gradio_auth = [(GRADIO_USERNAME, GRADIO_PASSWORD)]
-        print(f"Gradio 身份验证已配置，用户名: {GRADIO_USERNAME}")
+    if settings.GRADIO_USERNAME and settings.GRADIO_PASSWORD:
+        gradio_auth = [(settings.GRADIO_USERNAME, settings.GRADIO_PASSWORD)]
+        logging.info(f"Gradio 身份验证已配置，用户名: {settings.GRADIO_USERNAME}")
     else:
-        print('警告: 未找到 Gradio 身份验证配置。')
-    
+        logging.warning('警告: 未找到 Gradio 身份验证配置。')
+
     gradio_app = create_gradio_app()
-    
-    # 这是关键修复 - 在挂载应用时传递身份验证
+
     app_path = "/gradio"
     gr.mount_gradio_app(application, gradio_app, path=app_path, auth=gradio_auth)
-    
+
     return application
 
-
-# 初始化环境和服务
-validate_environment_variables()
-configure_proxy()
 app = init_app()
 security = HTTPBearer()
 
-
 async def get_api_key(credentials: HTTPAuthorizationCredentials = Security(security)) -> str:
     """验证 API 身份验证的 Bearer 令牌"""
-    if credentials.scheme != "Bearer" or credentials.credentials != API_BEARER_TOKEN:
+    if credentials.scheme != "Bearer" or credentials.credentials != settings.API_BEARER_TOKEN:
         raise HTTPException(status_code=401, detail="无效的 API 密钥")
     return credentials.credentials
-
 
 @app.post("/api/upload_image")
 async def api_upload_image(
     file: UploadFile = File(...),
     filename: str = Form(...),
-    api_key: str = Depends(get_api_key)
+    api_key: str = Depends(get_api_key),
+    scheduler_manager: SchedulerManager = Depends(lambda: scheduler_manager)
 ) -> Dict[str, str]:
     """上传图片的 API 端点"""
     try:
         image_array = np.array(Image.open(file.file))
-        save_image_to_dataset(filename, image_array)
+        await save_image_to_dataset(filename, image_array, scheduler_manager)
         return {"message": f"图片 '{filename}' 通过 API 成功上传！"}
     except Exception as e:
+        logging.error(f"API 上传图片失败: {e}")
         raise HTTPException(status_code=500, detail=f"上传图片失败: {str(e)}")
-
 
 @app.get("/")
 async def read_root() -> Dict[str, str]:
@@ -408,7 +419,6 @@ async def read_root() -> Dict[str, str]:
         "web_ui": "访问 /gradio 使用 Gradio Web UI。",
         "api_endpoint": "使用 POST /api/upload_image 通过 API 上传图片（需要 Bearer Token 身份验证）。"
     }
-
 
 if __name__ == "__main__":
     import uvicorn
