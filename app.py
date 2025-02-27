@@ -35,8 +35,8 @@ HTTPS_PROXY: Optional[str] = os.getenv('https_proxy')
 
 METADATA_FILENAME: str = 'metadata.jsonl'
 LOCAL_STORAGE: str = 'image_dataset'
-REPO_FOLDER_LIMIT: int = 4
-SCHEDULER_EVERY: int = 3
+REPO_FOLDER_LIMIT: int = 10
+SCHEDULER_EVERY: int = 5
 
 # 常量
 IMAGE_DATASET_DIR_PREFIX = "image_dataset"
