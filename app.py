@@ -43,6 +43,9 @@ IMAGE_DATASET_DIR_PREFIX = "image_dataset"
 MAX_IMAGES_PER_DIR = 10
 uploaded_buffer: List[str] = []  # 缓存上传的文件路径，提交后清理
 
+# 初始化目录
+Path(IMAGE_DATASET_DIR_PREFIX).mkdir(parents=False, exist_ok=False)
+
 
 class MyCommitScheduler(CommitScheduler):
     """自定义 CommitScheduler, 在推送成功后清理本地文件"""
