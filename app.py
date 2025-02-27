@@ -19,7 +19,9 @@ import typing as T
 import shutil
 import time
 import asyncio
-
+import threading
+from io import BytesIO
+import traceback
 
 # 环境配置
 load_dotenv()
@@ -34,7 +36,7 @@ HTTPS_PROXY: Optional[str] = os.getenv('https_proxy')
 METADATA_FILENAME: str = 'metadata.jsonl'
 LOCAL_STORAGE: str = 'image_dataset'
 REPO_FOLDER_LIMIT: int = 4
-SCHEDULER_EVERY: int = 1
+SCHEDULER_EVERY: int = 3
 
 # 常量
 IMAGE_DATASET_DIR_PREFIX = "image_dataset"
@@ -48,6 +50,7 @@ class MyCommitScheduler(CommitScheduler):
     def _push_to_hub(self) -> Dict[str, Any]:
         """重写推送方法，在推送成功后清理文件"""
         global uploaded_buffer
+        print(f'正在执行推送任务...{id(self)}')
         try:
             result = super()._push_to_hub()
             for file in uploaded_buffer:
@@ -55,9 +58,12 @@ class MyCommitScheduler(CommitScheduler):
                 if file_path.exists():
                     file_path.unlink()
             uploaded_buffer = []
+            print(f'推送任务执行成功')
             return result
         except Exception as e:
             raise e
+        finally:
+            print(f'推送任务执行完成')
     
     def stop(self):
         print(f'Before MyCommitScheduler.stop')
@@ -72,7 +78,6 @@ class SchedulerManager:
         self.repo_path = f'datasets/{self.repo_id}'
         self.hf_api = HfApi()
         self.fs = HfFileSystem()
-        self.force: bool = False
         self.__scheduler: T.Optional[CommitScheduler] = None
         self.initialize()
 
@@ -164,23 +169,43 @@ class SchedulerManager:
             files: T.List[str] = []
             for f in filter(lambda x:x['type'] == 'file', self.fs.ls(f'{self.repo_path}/{last_dir}', detail=True, refresh=True)):
                 files.append(f['name'])
-            if len(files) >= REPO_FOLDER_LIMIT - 1 or self.force:
+            if len(files) >= REPO_FOLDER_LIMIT - 1:
                 # 如果数量超过限制, 则创建一个新的子目录
-                print(dirs)
-                print(files)
                 last_dir = self.get_next_available_folder(dirs)
-                print(last_dir)
         else:
             # Step 04. 如果不存在, 则创建一个新的子目录, 编号从 0 开始
             last_dir = self.get_next_available_folder(dirs)
         return last_dir
 
     def stop(self):
-        # Step 01. 同步当前的目录
-        with self.__scheduler as s:
-            # 通过 CommitScheduler.__exit__, 强制触发一次目录同步
-            self.__scheduler = None
-        shutil.rmtree(self.local_folder)
+        def thread_to_sync(scheduler: CommitScheduler, folder: str, retry: int=0) -> None:
+            if retry > 3:
+                print(f'重试多次后依然失败, 已经结束...')
+                return
+            success: bool = False
+            try:
+                x = BytesIO()
+                with scheduler as s:
+                    x.write(str(s).encode())
+                del scheduler
+                success = True
+            except Exception as e:
+                print(f'同步旧的调度器时出现了问题: {e}')
+                traceback.print_exc()
+            finally:
+                print(f'成功同步并清理目录: {folder}')
+            if success:
+                shutil.rmtree(folder)
+                return
+            else:
+                time.sleep(60)
+                return thread_to_sync(scheduler, folder, retry+1)
+            
+        # Step 01. 在子线程中执行旧的同步任务
+        t = threading.Thread(target=thread_to_sync, args=(self.__scheduler, self.local_folder))
+        t.start()
+        self.__scheduler = None
+        return
 
     def switch_to_next(self) -> str:
         """切换到下一个目录
@@ -200,7 +225,6 @@ class SchedulerManager:
         """
         lines = self.count()
         if lines >= REPO_FOLDER_LIMIT - 1:
-            # self.force = True
             self.switch_to_next()
             return self.count()
         else:
