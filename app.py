@@ -25,7 +25,7 @@ import traceback
 import aiofiles
 import aiofiles.os
 import logging
-from pydantic import BaseSettings
+from pydantic_settings  import BaseSettings
 
 load_dotenv()
 
@@ -44,8 +44,8 @@ class Settings(BaseSettings):
     REPO_FOLDER_LIMIT: int = 4
     SCHEDULER_EVERY: int = 3
 
-    IMAGE_DATASET_DIR_PREFIX = "image_dataset"
-    MAX_IMAGES_PER_DIR = 10
+    IMAGE_DATASET_DIR_PREFIX: str = "image_dataset"
+    MAX_IMAGES_PER_DIR: int = 10
 
 settings = Settings()
 
@@ -186,7 +186,7 @@ class SchedulerManager:
             files: T.List[str] = []
             for f in filter(lambda x:x['type'] == 'file', self.fs.ls(f'{self.repo_path}/{last_dir}', detail=True, refresh=True)):
                 files.append(f['name'])
-            if len(files) >= REPO_FOLDER_LIMIT - 1:
+            if len(files) >= settings.REPO_FOLDER_LIMIT - 1:
                 # 如果数量超过限制, 则创建一个新的子目录
                 last_dir = self.get_next_available_folder(dirs)
         else:
@@ -266,7 +266,7 @@ def validate_environment_variables() -> None:
 
 def configure_proxy() -> None:
     """为 Hugging Face Hub API 请求配置 HTTP 代理"""
-    if HTTP_PROXY or HTTPS_PROXY:
+    if settings.HTTP_PROXY or settings.HTTPS_PROXY:
         def backend_factory() -> requests.Session:
             session = requests.Session()
             session.proxies = {
@@ -415,8 +415,8 @@ async def api_upload_image(
 async def read_root() -> Dict[str, str]:
     """应用程序信息的根端点"""
     return {
-        "message": "欢迎使用图片上传 API 和 Web UI！",
-        "web_ui": "访问 /gradio 使用 Gradio Web UI。",
+        "message": "欢迎使用图片上传 API 和 Web UI!",
+        "web_ui": "访问 /gradio 使用 Gradio Web UI.",
         "api_endpoint": "使用 POST /api/upload_image 通过 API 上传图片（需要 Bearer Token 身份验证）。"
     }
 

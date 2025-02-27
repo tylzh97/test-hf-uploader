@@ -11,3 +11,4 @@ python-dotenv
 python-multipart
 requests
 aiofiles
+pydantic-settings
