@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Security, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 import gradio as gr
-from huggingface_hub import CommitScheduler, configure_http_backend, HfApi, HfFileSystem, create_repo
+from huggingface_hub import CommitScheduler, configure_http_backend, HfApi, HfFileSystem, create_repo, update_repo_settings
 from PIL import Image
 import typing as T
 import shutil
@@ -44,7 +44,7 @@ MAX_IMAGES_PER_DIR = 10
 uploaded_buffer: List[str] = []  # 缓存上传的文件路径，提交后清理
 
 # 初始化目录
-Path(IMAGE_DATASET_DIR_PREFIX).mkdir(parents=False, exist_ok=False)
+Path(IMAGE_DATASET_DIR_PREFIX).mkdir(parents=False, exist_ok=True)
 
 
 class MyCommitScheduler(CommitScheduler):
@@ -139,11 +139,16 @@ class SchedulerManager:
             - 本地目录中存储满时
         """
         # Step 01. 检查远程仓库是否存在, 如果不存在则创建一个新的仓库
-        if not self.fs.exists(self.repo_path):
-            create_repo(self.repo_id, repo_type='dataset', private=True)
+        # 由于缓存问题, 此处不能够使用 HfFileSystem 接口
+        if not self.hf_api.repo_exists(self.repo_id, repo_type='dataset'):
+            print(f'创建了一个新的仓库')
+            create_repo(self.repo_id, repo_type='dataset', private=True, exist_ok=False)
+            while self.hf_api.repo_exists(self.repo_id, repo_type='dataset') is False:
+                time.sleep(5)
       
         # Step 02. 检查远程仓库中的目录结构
         dirs: T.List[str] = []
+        print(self.repo_path)
         for d in filter(lambda x:x['type'] == 'directory', self.fs.ls(self.repo_path, detail=True, refresh=True)):
             '''
             {
