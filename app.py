@@ -55,6 +55,28 @@ Path(IMAGE_DATASET_DIR_PREFIX).mkdir(parents=False, exist_ok=True)
 2. 
 '''
 class MyCommitScheduler(CommitScheduler):
+     def __init__(self, *args, ​**kwargs):
+        self.event = threading.Event()
+        super().__init__(*args, ​**kwargs)
+        self._timer_thread = threading.Thread(target=self._run_timer)
+        self._timer_thread.start()
+
+    def _run_timer(self):
+        while True:
+            if self.__stopped:
+                return
+            time.sleep(self.every * 60)
+            self.event.set()
+        return
+
+    def _run_scheduler(self) -> None:
+        """Dumb thread waiting between each scheduled push to Hub."""
+        while True:
+            self.event.wait()
+            self.event.clear()
+            self.last_future = self.trigger()
+            if self.__stopped:
+                break
 
     def update_folder(self, new_folder_path: str):
         if len(os.listdir(self.folder_path)) < MAX_IMAGES_PER_DIR:
@@ -78,6 +100,13 @@ class MyCommitScheduler(CommitScheduler):
             hf_api          = self.api,
         )
         pass
+
+    def get_new_folder_path(self) -> str:
+        # 1. 获取远程的目录列表
+        # 2. 获取本地的目录列表
+        # 3. 获取新的目录列表
+        # 4. 同步本地列表与远程列表的状态, 确保目录存在
+        return ''
 
     def _push_to_hub(self) -> Dict[str, Any]:
         result = super()._push_to_hub()
